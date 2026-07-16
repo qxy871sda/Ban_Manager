@@ -1,0 +1,14 @@
+[plugin]
+enabled = false
+admin_qq = ""
+send_group_notification = true
+adapter_type = "none"
+ban_user_id = []
+config_version = "1.0.0"
+
+[group_filter]
+group_mode = "whitelist"
+group_list = []
+
+[tool]
+tool_description = "当检测到群友对 bot 的发言中包含无端谩骂/骚扰、极其恶劣的人身攻击等行为时，可调用此工具将该用户拉入全局屏蔽名单中（拉黑），使 bot 主动忽略/屏蔽该用户，不再接收其后续消息。"
