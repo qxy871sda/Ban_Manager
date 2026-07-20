@@ -1,6 +1,6 @@
 {
   "manifest_version": 2,
-  "version": "1.0.0",
+  "version": "1.1.0",
   "name": "麦麦管理全局屏蔽名单",
   "description": "可以让麦麦自主决定将QQ号加入适配器的“全局屏蔽用户”名单内，支持管理员白名单/黑名单群聊过滤及管理员QQ号设置，指令添加移除名单。",
   "author": {
@@ -25,7 +25,9 @@
   "dependencies": [],
   "capabilities": [
     "send.text",
-    "config.get"
+    "config.get",
+    "message.get_by_id",
+    "message.get_recent"
   ],
   "i18n": {
     "default_locale": "zh-CN",
