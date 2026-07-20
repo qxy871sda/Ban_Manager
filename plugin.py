@@ -1,5 +1,6 @@
 from maibot_sdk import Command, Field, MaiBotPlugin, PluginConfigBase, Tool
 from maibot_sdk.types import ToolParameterInfo, ToolParamType
+from pydantic import field_validator
 from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple
 
@@ -33,10 +34,17 @@ class PluginSectionConfig(PluginConfigBase):
     )
     ban_user_id: List[str] = Field(
         default_factory=list,
-        description="当前全局屏蔽的 QQ 号列表。你可以在此直接添加、编辑或删除 QQ 号来进行修改。",
-        json_schema_extra={"label": "全局屏蔽用户（会同步适配器中的名单，若一方为空，则可能会同步清空已选择的适配器的名单内容)）"}
+        description="当前全局屏蔽的 QQ 号列表。你可以在此直接添加、编辑或删除 QQ 号来进行修改（仅支持纯数字 QQ 号）。",
+        json_schema_extra={"label": "全局屏蔽用户（纯数字 QQ 号，会同步适配器中的名单）"}
     )
     config_version: str = Field(default="1.0.0", description="配置版本", json_schema_extra={"label": "配置版本", "disabled": True})
+
+    @field_validator("ban_user_id", mode="before")
+    @classmethod
+    def _validate_ban_user_id(cls, v: Any) -> List[str]:
+        if not isinstance(v, list):
+            return []
+        return [str(x).strip() for x in v if str(x).strip().isdigit()]
 
 
 
@@ -68,7 +76,15 @@ class ToolSectionConfig(PluginConfigBase):
     __ui_order__ = 2
 
     tool_description: str = Field(
-        default="当检测到群友对 bot 的发言中包含无端谩骂/骚扰、极其恶劣的人身攻击等行为时，可调用此工具将该用户拉入全局屏蔽名单中（拉黑），使 bot 主动忽略/屏蔽该用户，不再接收其后续消息。",
+        default=(
+            "当检测到群友对 bot 的发言中包含无端谩骂/骚扰、极其恶劣的人身攻击等行为时，"
+            "调用此工具将该用户拉入全局屏蔽名单（拉黑）。"
+            "重要：上下文消息形如 <message msg_id=\"...\" user=\"昵称\" group_card=\"群名片\">，"
+            "其中没有直接给出 QQ 号。"
+            "调用时必须优先填写违规消息的 msg_id（从消息标签 msg_id 属性复制），"
+            "可附带 user 昵称；插件会自动把 msg_id 反查为真实 QQ 号后加入黑名单。"
+            "禁止把昵称、群名片当成 QQ 号传入。"
+        ),
         description="发送给 麦麦/LLM 的工具描述，以便用户能自主定义触发标准",
         json_schema_extra={"label": "工具描述/调用规则", "x-widget": "textarea"}
     )
@@ -99,13 +115,14 @@ class BanManagerPlugin(MaiBotPlugin):
 
     async def _initialize_ban_list_on_load(self) -> None:
         """启动时同步适配器已有的屏蔽名单到本插件的配置中。"""
-        adapters_list = self._get_current_ban_list()
-        our_list = [str(x).strip() for x in self.config.plugin.ban_user_id if str(x).strip()]
+        adapters_list = [str(x).strip() for x in self._get_current_ban_list() if str(x).strip().isdigit()]
+        our_list = [str(x).strip() for x in self.config.plugin.ban_user_id if str(x).strip().isdigit()]
+        raw_our_list = [str(x).strip() for x in self.config.plugin.ban_user_id if str(x).strip()]
         
-        # 如果适配器中有，但本插件配置中没有，则进行合并同步
-        if set(adapters_list) != set(our_list):
+        # 如果适配器中有，但本插件配置中没有，则进行合并同步；或者配置中包含非数字字段，我们需要清理
+        if set(adapters_list) != set(our_list) or len(our_list) != len(raw_our_list):
             merged_list = sorted(list(set(adapters_list) | set(our_list)))
-            self.ctx.logger.info(f"启动初始化同步，合并屏蔽名单: {merged_list}")
+            self.ctx.logger.info(f"启动初始化同步，合并并清理屏蔽名单: {merged_list}")
             
             # 写入本插件及所有适配器的配置文件
             import tomlkit
@@ -152,10 +169,32 @@ class BanManagerPlugin(MaiBotPlugin):
         del version
         self.ctx.logger.info("全局黑名单管理器配置已更新")
 
-        new_list = config_data.get("plugin", {}).get("ban_user_id", [])
-        if not isinstance(new_list, list):
-            new_list = []
-        new_list = [str(x).strip() for x in new_list if str(x).strip()]
+        raw_list = config_data.get("plugin", {}).get("ban_user_id", [])
+        if not isinstance(raw_list, list):
+            raw_list = []
+        
+        # 仅保留纯数字的 QQ 号
+        new_list = [str(x).strip() for x in raw_list if str(x).strip().isdigit()]
+        
+        # 如果过滤前后的列表不一致，说明有非数字项，我们需要清理自身的 config.toml
+        if len(new_list) != len(raw_list):
+            self.ctx.logger.warning("检测到黑名单中存在非数字QQ号，已自动过滤清理")
+            our_config_path = Path(__file__).resolve().parent / "config.toml"
+            if our_config_path.exists():
+                try:
+                    with open(our_config_path, "r", encoding="utf-8") as f:
+                        doc = tomlkit.parse(f.read())
+                    plugin_sec = doc.get("plugin")
+                    if plugin_sec is not None:
+                        new_array = tomlkit.array()
+                        for uid in new_list:
+                            new_array.append(uid)
+                        plugin_sec["ban_user_id"] = new_array
+                        with open(our_config_path, "w", encoding="utf-8") as f:
+                            f.write(doc.as_string())
+                except Exception as e:
+                    self.ctx.logger.error(f"清理自身黑名单配置失败: {e}", exc_info=True)
+
         self._sync_to_adapters(new_list)
 
     def _sync_to_adapters(self, new_list: List[str]) -> None:
@@ -187,8 +226,8 @@ class BanManagerPlugin(MaiBotPlugin):
                     ban_list = tomlkit.array()
                     chat["ban_user_id"] = ban_list
 
-                current_list = [str(x).strip() for x in ban_list]
-                norm_new_list = [str(x).strip() for x in new_list]
+                current_list = [str(x).strip() for x in ban_list if str(x).strip().isdigit()]
+                norm_new_list = [str(x).strip() for x in new_list if str(x).strip().isdigit()]
 
                 if set(current_list) != set(norm_new_list):
                     new_array = tomlkit.array()
@@ -223,6 +262,127 @@ class BanManagerPlugin(MaiBotPlugin):
                 return str(group_info.get("group_id") or "")
         return str(kwargs.get("group_id") or "")
 
+    def _extract_user_id_from_message_payload(self, payload: Any) -> str:
+        """从 message.get_by_id / get_recent 返回结构中提取 QQ 号。"""
+        if not isinstance(payload, dict):
+            return ""
+
+        message = payload.get("message") if isinstance(payload.get("message"), dict) else payload
+        if not isinstance(message, dict):
+            return ""
+
+        message_info = message.get("message_info")
+        if isinstance(message_info, dict):
+            user_info = message_info.get("user_info")
+            if isinstance(user_info, dict):
+                uid = str(user_info.get("user_id") or "").strip()
+                if uid.isdigit():
+                    return uid
+
+        for key in ("user_id", "sender_id"):
+            uid = str(message.get(key) or "").strip()
+            if uid.isdigit():
+                return uid
+        return ""
+
+    def _extract_user_names_from_message_payload(self, payload: Any) -> List[str]:
+        """提取消息发送者昵称/群名片，用于名称匹配。"""
+        if not isinstance(payload, dict):
+            return []
+        message = payload.get("message") if isinstance(payload.get("message"), dict) else payload
+        if not isinstance(message, dict):
+            return []
+
+        names: List[str] = []
+        message_info = message.get("message_info")
+        if isinstance(message_info, dict):
+            user_info = message_info.get("user_info")
+            if isinstance(user_info, dict):
+                for key in ("user_nickname", "user_cardname"):
+                    name = str(user_info.get(key) or "").strip()
+                    if name:
+                        names.append(name)
+        return names
+
+    async def _resolve_qq_from_msg_id(self, msg_id: str, stream_id: str = "") -> str:
+        """通过上下文中的 msg_id 反查真实 QQ 号。"""
+        msg_id = str(msg_id or "").strip()
+        if not msg_id:
+            return ""
+        try:
+            result = await self.ctx.message.get_by_id(
+                message_id=msg_id,
+                stream_id=stream_id or "",
+            )
+            return self._extract_user_id_from_message_payload(result)
+        except Exception as e:
+            self.ctx.logger.warning(f"通过 msg_id 反查 QQ 失败: msg_id={msg_id}, err={e}")
+            return ""
+
+    async def _resolve_qq_from_user_name(self, user_name: str, stream_id: str = "") -> str:
+        """通过用户昵称/群名片在最近消息中反查 QQ 号。"""
+        target_name = str(user_name or "").strip()
+        if not target_name or not stream_id:
+            return ""
+        try:
+            recent = await self.ctx.message.get_recent(stream_id, limit=40)
+        except Exception as e:
+            self.ctx.logger.warning(f"通过昵称反查 QQ 失败: name={target_name}, err={e}")
+            return ""
+
+        messages = recent
+        if isinstance(recent, dict):
+            messages = recent.get("messages") or recent.get("result") or []
+        if not isinstance(messages, list):
+            return ""
+
+        target_lower = target_name.lower()
+        for item in reversed(messages):
+            names = self._extract_user_names_from_message_payload(item)
+            for name in names:
+                if name == target_name or name.lower() == target_lower:
+                    uid = self._extract_user_id_from_message_payload(item)
+                    if uid.isdigit():
+                        return uid
+        return ""
+
+    async def _resolve_target_qq(
+        self,
+        *,
+        msg_id: str = "",
+        user_name: str = "",
+        user_id: str = "",
+        stream_id: str = "",
+    ) -> Tuple[str, str]:
+        """解析最终要拉黑的 QQ 号。
+
+        优先级：
+        1. 已是纯数字 QQ
+        2. msg_id 反查
+        3. 用户名/群名片在最近消息中反查
+        """
+        raw_user_id = str(user_id or "").strip()
+        if raw_user_id.isdigit():
+            return raw_user_id, "user_id"
+
+        resolved = await self._resolve_qq_from_msg_id(msg_id, stream_id=stream_id)
+        if resolved:
+            return resolved, "msg_id"
+
+        resolved = await self._resolve_qq_from_user_name(user_name, stream_id=stream_id)
+        if resolved:
+            return resolved, "user_name"
+
+        if raw_user_id and not raw_user_id.isdigit():
+            resolved = await self._resolve_qq_from_msg_id(raw_user_id, stream_id=stream_id)
+            if resolved:
+                return resolved, "user_id_as_msg_id"
+            resolved = await self._resolve_qq_from_user_name(raw_user_id, stream_id=stream_id)
+            if resolved:
+                return resolved, "user_id_as_name"
+
+        return "", ""
+
     def _is_group_allowed(self, group_id: str) -> bool:
         """检查目标群聊是否通过过滤规则。"""
         if not group_id:
@@ -237,7 +397,7 @@ class BanManagerPlugin(MaiBotPlugin):
     def _update_ban_list_everywhere(self, target_user_id: str, action: str) -> bool:
         """修改本插件以及选定适配器的 config.toml 中的 ban_user_id。"""
         target_uid_str = str(target_user_id).strip()
-        if not target_uid_str:
+        if not target_uid_str or not target_uid_str.isdigit():
             return False
 
         import tomlkit
@@ -280,7 +440,7 @@ class BanManagerPlugin(MaiBotPlugin):
                     ban_list = tomlkit.array()
                     section["ban_user_id"] = ban_list
 
-                current_list = [str(x).strip() for x in ban_list]
+                current_list = [str(x).strip() for x in ban_list if str(x).strip().isdigit()]
 
                 file_updated = False
                 if action == "add":
@@ -300,6 +460,14 @@ class BanManagerPlugin(MaiBotPlugin):
                         updated = True
 
                 if file_updated:
+                    # 清理列表中的非数字内容，一并写入
+                    cleaned_array = tomlkit.array()
+                    for item in ban_list:
+                        val = str(item).strip()
+                        if val.isdigit():
+                            cleaned_array.append(val)
+                    section["ban_user_id"] = cleaned_array
+
                     with open(path, "w", encoding="utf-8") as f:
                         f.write(doc.as_string())
                     self.ctx.logger.info(f"成功更新配置文件 {path.name}: {action} {target_uid_str}")
@@ -330,7 +498,9 @@ class BanManagerPlugin(MaiBotPlugin):
                     doc = tomlkit.parse(f.read())
                 ban_list = doc.get("chat", {}).get("ban_user_id", [])
                 for item in ban_list:
-                    banned_set.add(str(item).strip())
+                    val = str(item).strip()
+                    if val.isdigit():
+                        banned_set.add(val)
             except Exception as e:
                 self.ctx.logger.error(f"读取适配器黑名单列表失败 {path.name}: {e}")
 
@@ -374,7 +544,7 @@ class BanManagerPlugin(MaiBotPlugin):
         success = self._update_ban_list_everywhere(target_user_id, "add")
         if success:
             if self.config.plugin.send_group_notification:
-                reply = f"QQ号：{target_user_id}，已加入'全局屏蔽名单'，原因：{reason}。解除需要管理员/解除 {target_user_id}"
+                reply = f"QQ号：{target_user_id}，已加入'全局屏蔽名单'，原因：{reason}。解除请输入`/解除 {target_user_id}`"
                 await self.ctx.send.text(reply, stream_id)
             return True, "拉黑成功", True
         else:
@@ -460,41 +630,89 @@ class BanManagerPlugin(MaiBotPlugin):
 
     @Tool(
         "add_to_global_blacklist",
-        description="当检测到用户发言包含无端谩骂、极其恶劣的人身攻击等行为时，调用此工具将该用户拉入全局屏蔽名单（拉黑），使 bot 主动忽略/屏蔽该用户，不再接收或回复其后续消息。",
+        description=(
+            "当检测到用户发言包含无端谩骂、极其恶劣的人身攻击等行为时，调用此工具将该用户拉入全局屏蔽名单（拉黑）。"
+            "上下文消息格式为 <message msg_id=\"数字\" user=\"昵称\" group_card=\"群名片\">，没有直接给出 QQ 号。"
+            "请优先传违规消息的 msg_id；插件会自动反查真实 QQ 号并写入黑名单。不要传昵称当 QQ 号。"
+        ),
         parameters=[
             ToolParameterInfo(
-                name="user_id",
+                name="msg_id",
                 param_type=ToolParamType.STRING,
-                description="要屏蔽的违规用户的QQ号",
-                required=True
+                description="违规消息的 msg_id。从上下文 <message msg_id=\"...\"> 中复制，插件会据此自动反查真实 QQ 号。",
+                required=True,
             ),
             ToolParameterInfo(
                 name="reason",
                 param_type=ToolParamType.STRING,
                 description="屏蔽该用户的原因，即对用户无端谩骂言论的具体总结（字数控制在20字内）",
-                required=True
-            )
-        ]
+                required=True,
+            ),
+            ToolParameterInfo(
+                name="user_name",
+                param_type=ToolParamType.STRING,
+                description="可选。违规用户的昵称/群名片（user 或 group_card）。仅作辅助匹配，不能代替 msg_id。",
+                required=False,
+            ),
+            ToolParameterInfo(
+                name="user_id",
+                param_type=ToolParamType.STRING,
+                description="可选。若已知纯数字 QQ 号可直接填写；未知时不要填昵称，请改填 msg_id。",
+                required=False,
+            ),
+        ],
     )
-    async def handle_ban_tool(self, user_id: str, reason: str, **kwargs: Any) -> Dict[str, Any]:
+    async def handle_ban_tool(
+        self,
+        msg_id: str = "",
+        reason: str = "",
+        user_name: str = "",
+        user_id: str = "",
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
         if not self.config.plugin.enabled:
             return {"success": False, "content": "黑名单管理器插件未启用"}
 
-        stream_id = kwargs.get("stream_id", "")
-        # Check group whitelist/blacklist
+        stream_id = str(kwargs.get("stream_id") or "")
         group_id = self._get_group_id(**kwargs)
         if group_id and not self._is_group_allowed(group_id):
             return {"success": False, "content": "当前群聊不在黑名单管理器生效范围中，无法执行屏蔽。"}
 
-        success = self._update_ban_list_everywhere(user_id, "add")
+        target_qq, resolve_source = await self._resolve_target_qq(
+            msg_id=msg_id,
+            user_name=user_name,
+            user_id=user_id,
+            stream_id=stream_id,
+        )
+        if not target_qq:
+            return {
+                "success": False,
+                "content": (
+                    "拉黑失败：无法从上下文解析真实 QQ 号。"
+                    "请从消息标签中传入 msg_id（例如 <message msg_id=\"1798286565\" user=\"枫\"> 中的 1798286565），"
+                    "不要传入昵称/群名片。插件会自动反查 QQ 并加入黑名单。"
+                ),
+            }
+
+        success = self._update_ban_list_everywhere(target_qq, "add")
         if success:
-            if self.config.plugin.send_group_notification:
-                reply = f"QQ号：{user_id}，已加入'全局屏蔽名单'，原因：{reason}。解除需要管理员/解除 {user_id}"
-                if stream_id:
-                    await self.ctx.send.text(reply, stream_id)
-            return {"success": True, "content": f"已成功将 QQ号：{user_id} 加入黑名单，并在群内进行了处理。"}
-        else:
-            return {"success": False, "content": f"加入黑名单失败，可能是 QQ号 {user_id} 已在名单中。"}
+            if self.config.plugin.send_group_notification and stream_id:
+                reply = (
+                    f"QQ号：{target_qq}，已加入'全局屏蔽名单'，原因：{reason or '违规发言'}。"
+                    f"解除需要管理员/解除 {target_qq}"
+                )
+                await self.ctx.send.text(reply, stream_id)
+            return {
+                "success": True,
+                "content": (
+                    f"已成功将 QQ号：{target_qq} 加入黑名单"
+                    f"（解析来源：{resolve_source}，msg_id={str(msg_id or '').strip() or '无'}）。"
+                ),
+            }
+        return {
+            "success": False,
+            "content": f"加入黑名单失败，可能是 QQ号 {target_qq} 已在名单中。",
+        }
 
 
 def create_plugin() -> BanManagerPlugin:
