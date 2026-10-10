@@ -1,8 +1,8 @@
 {
   "manifest_version": 2,
-  "version": "1.1.0",
+  "version": "1.2.0",
   "name": "麦麦管理全局屏蔽名单",
-  "description": "可以让麦麦自主决定将QQ号加入适配器的“全局屏蔽用户”名单内，支持管理员白名单/黑名单群聊过滤及管理员QQ号设置，指令添加移除名单。",
+  "description": "可以让麦麦自主决定将QQ号加入适配器的“全局屏蔽用户”名单内，支持管理员白名单/黑名单群聊过滤及管理员QQ号设置，指令添加移除名单。适配最新 SnowLuma/NapCat 统一适配器的 [filters].ban_user_id 名单(使用SonwLuma测试，不保证NapCat可用)，并在拉黑前核对 msg_id 与违规原文，避免认错人。",
   "author": {
     "name": "qxy871sda",
     "url": "https://github.com/qxy871sda"
