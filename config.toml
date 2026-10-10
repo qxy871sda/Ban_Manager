@@ -1,14 +1,15 @@
 [plugin]
-enabled = false
-admin_qq = ""
+enabled = true
+admin_qq = "111222333"
 send_group_notification = true
-adapter_type = "none"
-ban_user_id = []
-config_version = "1.0.0"
+adapter_type = "snowluma"
+ban_user_id = [
+]
+config_version = "1.1.0"
 
 [group_filter]
-group_mode = "whitelist"
+group_mode = "blacklist"
 group_list = []
 
 [tool]
-tool_description = "当检测到群友对 bot 的发言中包含无端谩骂/骚扰、极其恶劣的人身攻击等行为时，可调用此工具将该用户拉入全局屏蔽名单中（拉黑），使 bot 主动忽略/屏蔽该用户，不再接收其后续消息。"
+tool_description = "把【明确针对麦麦（本 bot）的严重恶意发言者】拉入全局屏蔽名单（拉黑）。\n一、先判断这条消息是不是在说麦麦：\n- 只有明确指向麦麦才处理：明确 @ 麦麦、直接呼唤麦麦的名字/别名，或上下文明摆着就是对麦麦说的话。\n- 以下一律不要处理，禁止对号入座：群友之间互骂斗嘴、玩笑玩梗、谐音软化语气、复读、口癖（如“滚”“爬”“傻逼”但没有 @ 或点名麦麦）、讨论 AI/BOT/机器人话题、泛指“AI”“机器人”，以及麦麦自己脑补出来的“被针对”。\n- 判断不了就不要调用：漏掉一次不会有后果，误拉黑会误伤无辜群友，后者严重得多。\n二、再判断恶意程度：\n- 需要严重且持续、明确指定性的恶意（同一人多条辱骂/骚扰/极其恶劣的人身攻击）；偶尔一句脏话、轻度冒犯、对方明显在开玩笑都不要拉黑。\n三、调用方式：\n- 确认要拉黑的是“发出那条违规消息的本人”，不是正在被回复的人、不是语气最凶的人、也不是昵称相似的人。\n- 必填 msg_id：从上下文 <message msg_id=\"...\"> 里原样复制那条违规消息的 msg_id，插件用它反查发送者的真实 QQ 号。不要编造 msg_id，不要把昵称、群名片当成 QQ 号。\n- 必填 evidence：原样复制那条违规消息的原文（可只摘录最恶劣的部分），插件会核对原文与该 msg_id 是否一致，对不上会拒绝执行。\n- 插件会拒绝把麦麦自己的 QQ 拉黑；若解析出的发送者是麦麦本人，说明 msg_id 选错了，请重新核对。\n- user_name / user_id 只作为辅助信息，不参与身份判定。"
